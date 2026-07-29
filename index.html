@@ -789,17 +789,21 @@ function buildRoles(total, U, W){
   while(roles.length<total) roles.push('civilian');
   return roles;
 }
+/* Mr White has no word, so speaking early is a death sentence — he never gets
+   one of the first MW_BLOCKED_SLOTS turns (i.e. never #1 and never #2). */
+const MW_BLOCKED_SLOTS = 2;
 function makeOrder(players){
-  const aliveIdx = players.map((p,i)=>i).filter(i=>players[i].alive);
-  const ord = shuffle(aliveIdx);
-  // Deterministically guarantee Mr White is never #1: if the shuffle put a
-  // Mr White first, swap it with the first non-Mr-White slot in the order.
-  // (When only Mr Whites are alive the game has already ended, so this is safe.)
-  if(ord.length && players[ord[0]].role==='mrWhite'){
-    const j = ord.findIndex(i=>players[i].role!=='mrWhite');
-    if(j>0){ const t=ord[0]; ord[0]=ord[j]; ord[j]=t; }
-  }
-  return ord;
+  const alive = players.map((p,i)=>i).filter(i=>players[i].alive);
+  // Draw the blocked slots from the non-Mr-White pool, then shuffle everyone
+  // left over into the tail. This is uniform across every order that satisfies
+  // the rule — repairing a plain shuffle instead would bunch Mr White onto the
+  // first allowed slot and make his position a tell.
+  // Best effort: if fewer non-Mr-Whites are alive than there are blocked slots,
+  // the leftover slots fall back to Mr Whites.
+  const safe = shuffle(alive.filter(i=>players[i].role!=='mrWhite'));
+  const lead = safe.slice(0, MW_BLOCKED_SLOTS);
+  const tail = shuffle(alive.filter(i=>!lead.includes(i)));
+  return lead.concat(tail);
 }
 /* NEW win conditions: only all-impostors-out OR all-civilians-out.
    (Mr White correct guess is handled separately in the flow.) */
@@ -810,6 +814,23 @@ function checkWin(players){
   if(imp===0) return 'civilians';   // كل الخبثاء تنحّاو
   if(civ===0) return 'impostors';   // كل المواطنين تنحّاو
   return null;                       // اللعبة تكمّل
+}
+
+/* ---- scoring rules ----
+   Teams win together. 'impostors' (all civilians out) and 'mrWhite' (Mr White
+   guessed the civilian word) are both wins for the same impostor team, so every
+   undercover AND every Mr White scores — eliminated ones included. Same for the
+   civilian team. The Mr White who lands the guess takes an extra bonus on top. */
+const ROLE_POINTS = { undercover:10, mrWhite:6, civilian:2 };
+const MW_GUESS_BONUS = 4;
+function isImpostor(p){ return p.role!=='civilian'; }
+function didWin(player, winner){
+  return winner==='civilians' ? player.role==='civilian' : isImpostor(player);
+}
+function rewardFor(player, winner, g){
+  if(!didWin(player, winner)) return 0;
+  const guesser = (winner==='mrWhite' && g && g.lastEliminated!=null) ? g.players[g.lastEliminated] : null;
+  return ROLE_POINTS[player.role] + (player===guesser ? MW_GUESS_BONUS : 0);
 }
 /* ---- guess normalization ---- */
 function normAr(s){
@@ -1274,14 +1295,13 @@ function saveScores(s){ LS.set(K.scores, s); }
 function applyScoring(g, winner){
   const scores=loadScores();
   const ensure=n=>{ if(!scores[n]) scores[n]={points:0,wins:0,roundsPlayed:0}; return scores[n]; };
-  g.players.forEach(p=>{ ensure(p.name).roundsPlayed++; });
-  if(winner==='civilians'){
-    g.players.filter(p=>p.role==='civilian').forEach(p=>{ const s=ensure(p.name); s.points+=2; s.wins++; });
-  }else if(winner==='impostors'){
-    g.players.filter(p=>p.alive && p.role!=='civilian').forEach(p=>{ const s=ensure(p.name); s.points+=(p.role==='undercover'?10:6); s.wins++; });
-  }else if(winner==='mrWhite'){
-    const mw=g.players[g.lastEliminated]; const s=ensure(mw.name); s.points+=6; s.wins++;
-  }
+  g.players.forEach(p=>{
+    const s=ensure(p.name);
+    s.roundsPlayed++;
+    if(!didWin(p, winner)) return;
+    s.points += rewardFor(p, winner, g);
+    s.wins++;
+  });
   saveScores(scores);
 }
 function endGame(winner){
@@ -1292,19 +1312,14 @@ function endGame(winner){
 }
 enter.END = ()=>{
   const winner=G.winner;
-  const map={ civilians:['🌸 ربحوا المواطنين!','win-civ'], impostors:['🕵️ ربح الفريق الخبيث!','win-imp'], mrWhite:['🤍 ربح مستر وايت!','win-mw'] };
+  const map={ civilians:['🌸 ربحوا المواطنين!','win-civ'], impostors:['🕵️ ربح الفريق الخبيث!','win-imp'], mrWhite:['🤍 حزرها مستر وايت!','win-mw'] };
   const [text,cls]=map[winner];
-  $('win-eyebrow').textContent = winner==='mrWhite' ? 'وحدو...' : 'ربح...';
+  $('win-eyebrow').textContent = winner==='mrWhite' ? 'ربح الفريق الخبيث الكل 🎯' : 'ربح...';
   const tm=$('win-team'); tm.className='win-team '+cls; tm.textContent=text;
   $('words-reveal').innerHTML=`
     <div class="word-pill civ"><div class="rl">🌸 المواطنين</div><div class="wa">${esc(G.civWord.ar)}</div><div class="wl">${esc(G.civWord.lat)}</div></div>
     <div class="word-pill und"><div class="rl">🕵️ الأندركوفر</div><div class="wa">${esc(G.undWord.ar)}</div><div class="wl">${esc(G.undWord.lat)}</div></div>`;
-  const reward=p=>{
-    if(winner==='civilians' && p.role==='civilian') return 2;
-    if(winner==='impostors' && p.alive && p.role!=='civilian') return p.role==='undercover'?10:6;
-    if(winner==='mrWhite' && G.players[G.lastEliminated]===p) return 6;
-    return 0;
-  };
+  const reward=p=>rewardFor(p, winner, G);
   // Live session standings — cumulative totals already saved by applyScoring().
   const scores=loadScores();
   const medals=['🥇','🥈','🥉'];
@@ -1380,7 +1395,9 @@ $('btn-rules').onclick=()=>{ Audio.click(); openModal(`
     <li>كل دورة، كل واحد يوصف كلمتو بـ<b>كلمة وحدة بركة</b>، بلا ما يقولها بصراحة.</li>
     <li>بعد الوصف، الجماعة تڤوطي على اللي تحسّو خبيث و تنحّيه.</li>
     <li>الفوت <b>ديما يكمّل</b>: كان تنحّي مواطن، اللعبة تكمّل عادي. اللعبة تسالي كان المواطنين ينحّيو الخبثاء الكل، ولّا الخبثاء ينحّيو المواطنين الكل.</li>
-    <li>كان يتنحّى <b>مستر وايت</b>، عندو <b>فرصة أخيرة</b> باش يحزر كلمة المواطنين — كان حزرها يربح وحدو! 🎯</li>
+    <li>كان يتنحّى <b>مستر وايت</b>، عندو <b>فرصة أخيرة</b> باش يحزر كلمة المواطنين — كان حزرها يربح هو و فريقو الخبيث الكل! 🎯</li>
+    <li>مستر وايت ما عندو كلمة، علاهذا <b>ما يبداش الأول ولا الثاني</b> في الوصف. 🤍</li>
+    <li>الفريق اللي يربح، <b>أعضاؤه الكل ياخذوا نقاط</b> — حتى اللي تنحّى قبل. أندركوفر ${ROLE_POINTS.undercover} نقاط، مستر وايت ${ROLE_POINTS.mrWhite}، مواطن ${ROLE_POINTS.civilian}. و كان مستر وايت حزر الكلمة يزيدو ${MW_GUESS_BONUS} نقاط بونيس. 🏆</li>
   </ul></div>
   <div class="modal-actions"><button class="btn btn-gold" id="rules-ok">فهمت! 👍</button></div>`);
   $('rules-ok').onclick=()=>{ Audio.click(); closeModal(); };
